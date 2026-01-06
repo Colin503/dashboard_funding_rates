@@ -1,6 +1,11 @@
 # 🏹 Variational Funding Monitor
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://variationalfundingrates.streamlit.app/)
+
 A real-time dashboard to monitor and analyze funding rates on **Variational Omni**. This tool helps traders identify high-yield opportunities (APR) and potential market imbalances.
+
+## 🔗 Live Dashboard
+**Access the hosted app here: [https://variationalfundingrates.streamlit.app/](https://variationalfundingrates.streamlit.app/)**
 
 ## ✨ Features
 
@@ -15,7 +20,7 @@ A real-time dashboard to monitor and analyze funding rates on **Variational Omni
 - **Language**: Python
 - **Dashboard**: Streamlit
 - **Data Visualization**: Plotly
-- **API**: Variational Omni Client API (`/metadata/stats`)
+- **API**: Variational Omni Client API (`https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats`)
 
 ## 🚀 How to Run Locally
 
