@@ -34,7 +34,7 @@ if data:
 
     config = {
         "ticker": "Asset",
-        "periodic_rate": st.column_config.NumberColumn("Rate (Période)", format="%.4f%%"),
+        "periodic_rate": st.column_config.NumberColumn("Rate (Period)", format="%.4f%%"),
         "funding_apr": st.column_config.NumberColumn("Annual APR", format="%.2f%%"),
         "volume_24h": st.column_config.NumberColumn("Vol 24h", format="$%d")
     }
