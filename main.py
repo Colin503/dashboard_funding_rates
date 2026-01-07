@@ -114,5 +114,3 @@ if not df.empty:
     st.success(f"Found {len(df)} arbitrage opportunities.")
 else:
     st.info("No arbitrage pairs found.")
-
-#teeeest
