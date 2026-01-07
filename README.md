@@ -1,28 +1,31 @@
-# 🏹 Variational Funding Monitor
+# ⚖️ Multi-DEX Funding Arbitrage Map
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://variationalfundingrates.streamlit.app/)
 
-A real-time dashboard to monitor and analyze funding rates on **Variational Omni**. This tool helps traders identify high-yield opportunities (APR) and potential market imbalances.
+A real-time arbitrage dashboard that monitors and compares funding rates across **Variational Omni**, **Hyperliquid**, and **Lighter**. This tool identifies Delta-Neutral opportunities by highlighting the spread between different perpetual exchanges.
 
 ## 🔗 Live Dashboard
 **Access the hosted app here: [https://variationalfundingrates.streamlit.app/](https://variationalfundingrates.streamlit.app/)**
 
 ## ✨ Features
 
-- **Live Data**: Fetches real-time statistics directly from the Variational Public REST API.
-- **APR Tracking**: Automatically calculates the Annual Percentage Rate (APR) for all listings.
-- **Periodic Rates**: Displays the funding rate per specific interval (e.g., 4h or 8h) as shown on the exchange interface.
-- **Extreme Funding Detection**: Instantly identifies the Top 10 markets where Longs pay Shorts (High Positive APR) and where Shorts pay Longs (High Negative APR).
-- **Volume Metrics**: Integrates 24h trading volume to filter significant opportunities.
+- **Multi-DEX Aggregation**: Real-time data fetching from Variational, Hyperliquid, and Lighter APIs.
+- **Smart Arbitrage Filter**: Automatically hides assets that are not available on at least two platforms to focus only on tradable opportunities.
+- **Visual Trading Guide**: 
+    - 🟩 **Green Cells**: Highlight the lowest funding rate for an asset (**Long Opportunity**).
+    - 🟥 **Red Cells**: Highlight the highest funding rate for an asset (**Short Opportunity**).
+- **Automated De-duplication**: Cleans raw API data (especially from Lighter) to ensure one unique row per ticker.
+- **Profit Potential (Spread)**: Calculates the maximum APR gap between available exchanges.
 
-## 🛠️ Technical Stack
+## 📊 Calculation & Data Logic
 
-- **Language**: Python
-- **Dashboard**: Streamlit
-- **Data Visualization**: Plotly
-- **API**: Variational Omni Client API (`https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats`)
+To ensure fair comparison, all funding rates are converted to **Annualized Percentage Rate (APR)**:
 
-## 🚀 How to Run Locally
+* **Variational**: `funding_rate` * 100 (API provides raw annual base).
+* **Hyperliquid**: `daily_funding` * 365 * 100.
+* **Lighter**: `periodic_rate` * (Number of periods per year) * 100.
+
+## 🛠️ Installation & Local Run
 
 1. **Clone the repository**:
    ```bash
