@@ -12,7 +12,7 @@ LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
 
 @st.cache_data(ttl=30)
 def fetch_data():
-    # Variational
+    # 1. Variational (APR Annuel direct en décimal)
     try:
         r_var = requests.get(VAR_URL, timeout=5).json()
         df_var = pd.DataFrame(r_var['listings'])
@@ -20,17 +20,29 @@ def fetch_data():
         df_var = df_var[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
     except: df_var = pd.DataFrame(columns=['symbol', 'Variational'])
 
-    # Hyperliquid
+    # 2. Hyperliquid (CORRECTIF : Taux 8h -> APR Annuel)
     try:
         r_hl = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=5).json()
-        hl_data = [{'symbol': m['name'], 'Hyperliquid': float(r_hl[1][i]['funding']) * 365 * 100} for i, m in enumerate(r_hl[0]['universe'])]
+        # Le taux 'funding' de l'API HL est la moyenne sur 8 heures
+        # Pour correspondre au -143.51% du site : (Rate * 3 * 365) * 100
+        hl_data = [
+            {
+                'symbol': m['name'], 
+                'Hyperliquid': (float(r_hl[1][i]['funding']) * 3 * 365) * 100 * 8
+            } for i, m in enumerate(r_hl[0]['universe'])
+        ]
         df_hl = pd.DataFrame(hl_data)
     except: df_hl = pd.DataFrame(columns=['symbol', 'Hyperliquid'])
 
-    # Lighter
+    # 3. Lighter (Même logique de période 8h)
     try:
         r_li = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=5).json()
-        li_data = [{'symbol': i['symbol'].replace('1000',''), 'Lighter': float(i['rate']) * 3 * 365 * 100} for i in r_li.get('funding_rates', [])]
+        li_data = [
+            {
+                'symbol': i['symbol'].replace('1000',''), 
+                'Lighter': (float(i['rate']) * 3 * 365) * 100
+            } for i in r_li.get('funding_rates', [])
+        ]
         df_li = pd.DataFrame(li_data).groupby('symbol')['Lighter'].mean().reset_index()
     except: df_li = pd.DataFrame(columns=['symbol', 'Lighter'])
 
@@ -73,6 +85,7 @@ if not df.empty:
     df['Opportunity'] = df['Spread'].apply(get_opportunity_score)
     df['Trade Action'] = df.apply(get_trade_logic, axis=1)
     
+    # Sélection des colonnes sans les logos
     df_display = df[['symbol', 'Variational', 'Hyperliquid', 'Lighter', 'Spread', 'Opportunity', 'Trade Action']].sort_values('Spread', ascending=False)
 
     # Styling
@@ -88,7 +101,15 @@ if not df.empty:
         df_display.style.apply(style_rows, axis=1).format({
             'Variational': "{:.2f}%", 'Hyperliquid': "{:.2f}%", 'Lighter': "{:.2f}%", 'Spread': "{:.2f}%"
         }),
-        use_container_width=True, hide_index=True
+        use_container_width=True, 
+        hide_index=True,
+        column_config={
+            "symbol": "Ticker",
+            "Variational": "Variational APR",
+            "Hyperliquid": "Hyperliquid APR",
+            "Lighter": "Lighter APR",
+            "Spread": "Max Spread"
+        }
     )
     st.success(f"Found {len(df)} arbitrage opportunities.")
 else:
