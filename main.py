@@ -2,53 +2,96 @@ import streamlit as st
 import requests
 import pandas as pd
 
-API_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
-st.set_page_config(page_title="Variational Monitor", layout="wide")
+# --- APP CONFIGURATION ---
+st.set_page_config(page_title="Arbitrage Funding Map", layout="wide")
 
-def fetch_data():
+# API Endpoints
+VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
+HL_URL = "https://api.hyperliquid.xyz/info"
+LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
+
+def fetch_variational():
     try:
-        response = requests.get(API_URL, timeout=10)
-        return response.json()
-    except:
-        return None
+        r = requests.get(VAR_URL, timeout=5).json()
+        df = pd.DataFrame(r['listings'])
+        df['Variational'] = pd.to_numeric(df['funding_rate']) * 100
+        return df[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
+    except: return pd.DataFrame(columns=['symbol', 'Variational'])
 
-data = fetch_data()
+def fetch_hyperliquid():
+    try:
+        r = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=5).json()
+        hl_data = [{'symbol': m['name'], 'Hyperliquid': float(r[1][i]['funding']) * 365 * 100} 
+                   for i, m in enumerate(r[0]['universe'])]
+        return pd.DataFrame(hl_data)
+    except: return pd.DataFrame(columns=['symbol', 'Hyperliquid'])
 
-if data:
-    df = pd.DataFrame(data['listings'])
+def fetch_lighter():
+    try:
+        r = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=5).json()
+        l_data = []
+        for i in r.get('funding_rates', []):
+            # Clean symbol and remove multipliers like '1000'
+            symbol = i['symbol'].replace('1000','')
+            if i.get('rate') is not None:
+                l_data.append({'symbol': symbol, 'Lighter': float(i['rate']) * 3 * 365 * 100})
+        
+        df_l = pd.DataFrame(l_data)
+        if not df_l.empty:
+            # Group by symbol to remove duplicates (takes the average rate)
+            df_l = df_l.groupby('symbol')['Lighter'].mean().reset_index()
+        return df_l
+    except: return pd.DataFrame(columns=['symbol', 'Lighter'])
+
+# --- STYLING FUNCTION ---
+def highlight_arbitrage(row):
+    dex_cols = ['Variational', 'Hyperliquid', 'Lighter']
+    styles = ['' for _ in row.index]
+    vals = row[dex_cols].astype(float)
+    if vals.notna().sum() >= 2:
+        idx_min = vals.idxmin()
+        idx_max = vals.idxmax()
+        # Green for Long (lowest), Red for Short (highest)
+        styles[row.index.get_loc(idx_min)] = 'background-color: #006400; color: white'
+        styles[row.index.get_loc(idx_max)] = 'background-color: #8B0000; color: white'
+    return styles
+
+# --- MAIN UI ---
+st.title("⚖️ Delta-Neutral Arbitrage Map")
+st.markdown("""
+**Visual Guide:**
+* 🟩 **Green Cell**: Lowest rate -> **Open LONG position here.**
+* 🟥 **Red Cell**: Highest rate -> **Open SHORT position here.**
+""")
+
+if st.button('🔄 Refresh Data'):
+    st.cache_data.clear()
+
+with st.spinner('Analyzing market opportunities...'):
+    df_var = fetch_variational()
+    df_hl = fetch_hyperliquid()
+    df_lighter = fetch_lighter()
+
+    # Merging data
+    df = pd.merge(df_var, df_hl, on='symbol', how='outer')
+    df = pd.merge(df, df_lighter, on='symbol', how='outer')
     
-    # 1. Conversion des types
-    df['funding_rate_raw'] = pd.to_numeric(df['funding_rate'])
-    df['funding_interval_s'] = pd.to_numeric(df['funding_interval_s'])
-    df['volume_24h'] = pd.to_numeric(df['volume_24h'])
+    dex_columns = ['Variational', 'Hyperliquid', 'Lighter']
+    # Filter rows: keep only symbols available on at least 2 exchanges
+    df['dex_count'] = df[dex_columns].notna().sum(axis=1)
+    df_filtered = df[df['dex_count'] >= 2].copy()
 
-    # 2. CALCUL CORRECT (Basé sur tes screenshots)
-    # L'APR est directement le funding_rate de l'API multiplié par 100
-    df['funding_apr'] = df['funding_rate_raw'] * 100
-    
-    # Le taux par période (ex: 4h) affiché sur le site est : APR / (Nombre de périodes par an)
-    # Nombre de périodes = Secondes dans l'année / Intervalle en secondes
-    df['periodic_rate'] = df['funding_apr'] / (31536000 / df['funding_interval_s'])
+    if not df_filtered.empty:
+        # Calculate maximum spread
+        df_filtered['Profit Delta'] = df_filtered[dex_columns].max(axis=1) - df_filtered[dex_columns].min(axis=1)
+        df_display = df_filtered[['symbol', 'Variational', 'Hyperliquid', 'Lighter', 'Profit Delta']].sort_values('Profit Delta', ascending=False)
 
-    st.title("🏹 Variational Funding Monitor")
+        # Apply Pandas Styling
+        styled_df = df_display.style.apply(highlight_arbitrage, axis=1).format({
+            'Variational': "{:.2f}%", 'Hyperliquid': "{:.2f}%", 'Lighter': "{:.2f}%", 'Profit Delta': "{:.2f}%"
+        })
 
-    config = {
-        "ticker": "Asset",
-        "periodic_rate": st.column_config.NumberColumn("Rate (Period)", format="%.4f%%"),
-        "funding_apr": st.column_config.NumberColumn("Annual APR", format="%.2f%%"),
-        "volume_24h": st.column_config.NumberColumn("Vol 24h", format="$%d")
-    }
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("🔴 Top APR (Longs)")
-        top_longs = df.sort_values('funding_apr', ascending=False).head(10)
-        st.dataframe(top_longs[['ticker', 'periodic_rate', 'funding_apr', 'volume_24h']], 
-                     column_config=config, hide_index=True)
-
-    with col2:
-        st.subheader("🟢 Top APR (Shorts)")
-        top_shorts = df.sort_values('funding_apr', ascending=True).head(10)
-        st.dataframe(top_shorts[['ticker', 'periodic_rate', 'funding_apr', 'volume_24h']], 
-                     column_config=config, hide_index=True)
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        st.success(f"Found {len(df_filtered)} arbitrage opportunities.")
+    else:
+        st.warning("No arbitrage matches found between DEXs.")
