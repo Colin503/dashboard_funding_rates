@@ -114,3 +114,39 @@ if not df.empty:
     st.success(f"Found {len(df)} arbitrage opportunities.")
 else:
     st.info("No arbitrage pairs found.")
+
+
+
+
+# --- FOOTER ---
+st.markdown("---")
+# Layout with two columns
+col_aff, col_social = st.columns([3, 1])
+
+with col_aff:
+    # Minimalist referral box with Dark Green accent
+    st.markdown("""
+        <div style="background-color: rgba(255, 255, 255, 0.03); padding: 12px; border-radius: 8px; border-left: 4px solid #006400;">
+            <p style="margin: 0; font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;">Ready to trade?</p>
+            <p style="margin: 0; font-size: 15px; font-weight: 500;">
+            </p>
+            <a href="https://app.hyperliquid.xyz/join/CACA" target="_blank" style="color: #008000; text-decoration: none; font-weight: 600; font-size: 14px;">
+                Start trading on <b>Hyperliquid</b> to capture these spreads.→
+            </a>
+        </div>
+    """, unsafe_allow_html=True)
+
+with col_social:
+    # Minimalist social links
+    st.markdown(
+        """
+        <div style="text-align: right; padding-top: 10px;">
+            <p style="margin-bottom: 8px; font-size: 12px; color: #666;">Developer</p>
+            <a href="https://x.com/C0l1n503" target="_blank" style="text-decoration: none;">
+                <span style="color: #666; font-size: 12px; margin-right: 10px;">@C0l1n503</span>
+                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/X_%28formerly_Twitter%29_logo_late_2025.svg/330px-X_%28formerly_Twitter%29_logo_late_2025.svg.png" width="18" style="filter: opacity(0.6);">
+            </a>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
