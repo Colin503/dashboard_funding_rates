@@ -1,11 +1,11 @@
 # ⚖️ Multi-DEX Funding Arbitrage Map
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://variationalfundingrates.streamlit.app/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://fundingarbitrage.streamlit.app/)
 
 A real-time arbitrage dashboard that monitors and compares funding rates across **Variational Omni**, **Hyperliquid**, and **Lighter**. This tool identifies Delta-Neutral opportunities by highlighting the spread between different perpetual exchanges.
 
 ## 🔗 Live Dashboard
-**Access the hosted app here: [https://variationalfundingrates.streamlit.app/](https://variationalfundingrates.streamlit.app/)**
+**Access the hosted app here: [https://fundingarbitrage.streamlit.app/](https://fundingarbitrage.streamlit.app/)**
 
 ## ✨ Features
 
