@@ -1,9 +1,13 @@
 import streamlit as st
 import requests
 import pandas as pd
+from streamlit_autorefresh import st_autorefresh
 
 # --- APP CONFIGURATION ---
 st.set_page_config(page_title="Arbitrage Execution Map", layout="wide")
+
+# --- AUTO-REFRESH (Every 30 seconds) ---
+st_autorefresh(interval=30 * 1000, limit=None, key="funder_refresh")
 
 # API Endpoints
 VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
@@ -12,7 +16,7 @@ LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
 
 @st.cache_data(ttl=30)
 def fetch_data():
-    # 1. Variational (APR Annuel direct en décimal)
+    # 1. Variational
     try:
         r_var = requests.get(VAR_URL, timeout=5).json()
         df_var = pd.DataFrame(r_var['listings'])
@@ -20,29 +24,17 @@ def fetch_data():
         df_var = df_var[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
     except: df_var = pd.DataFrame(columns=['symbol', 'Variational'])
 
-    # 2. Hyperliquid (CORRECTIF : Taux 8h -> APR Annuel)
+    # 2. Hyperliquid (Corrected * 8)
     try:
         r_hl = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=5).json()
-        # Le taux 'funding' de l'API HL est la moyenne sur 8 heures
-        # Pour correspondre au -143.51% du site : (Rate * 3 * 365) * 100
-        hl_data = [
-            {
-                'symbol': m['name'], 
-                'Hyperliquid': (float(r_hl[1][i]['funding']) * 3 * 365) * 100 * 8
-            } for i, m in enumerate(r_hl[0]['universe'])
-        ]
+        hl_data = [{'symbol': m['name'], 'Hyperliquid': float(r_hl[1][i]['funding']) * 8 * 3 * 365 * 100} for i, m in enumerate(r_hl[0]['universe'])]
         df_hl = pd.DataFrame(hl_data)
     except: df_hl = pd.DataFrame(columns=['symbol', 'Hyperliquid'])
 
-    # 3. Lighter (Même logique de période 8h)
+    # 3. Lighter (Corrected * 8)
     try:
         r_li = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=5).json()
-        li_data = [
-            {
-                'symbol': i['symbol'].replace('1000',''), 
-                'Lighter': (float(i['rate']) * 3 * 365) * 100
-            } for i in r_li.get('funding_rates', [])
-        ]
+        li_data = [{'symbol': i['symbol'].replace('1000',''), 'Lighter': float(i['rate']) * 8 * 3 * 365 * 100} for i in r_li.get('funding_rates', [])]
         df_li = pd.DataFrame(li_data).groupby('symbol')['Lighter'].mean().reset_index()
     except: df_li = pd.DataFrame(columns=['symbol', 'Lighter'])
 
@@ -65,10 +57,8 @@ def get_opportunity_score(spread):
 
 # --- MAIN UI ---
 st.title("⚖️ Delta-Neutral Arbitrage Map")
-st.markdown("Trade Smarter: Visual Execution Guide")
-
-if st.button('🔄 Refresh Data'):
-    st.cache_data.clear()
+st.markdown("Trade Smarter: Real-time Execution Guide")
+st.caption("🔄 Data refreshes automatically every 30 seconds")
 
 df_var, df_hl, df_li = fetch_data()
 
@@ -76,19 +66,17 @@ df_var, df_hl, df_li = fetch_data()
 df = pd.merge(df_var, df_hl, on='symbol', how='outer')
 df = pd.merge(df, df_li, on='symbol', how='outer')
 
-# Filter & Metrics
+# Filter
 dex_cols = ['Variational', 'Hyperliquid', 'Lighter']
 df = df[df[dex_cols].notna().sum(axis=1) >= 2].copy()
 
 if not df.empty:
-    df['Spread'] = df[dex_cols].max(axis=1) - df[dex_cols].min(axis=1)
-    df['Opportunity'] = df['Spread'].apply(get_opportunity_score)
+    df['APR'] = df[dex_cols].max(axis=1) - df[dex_cols].min(axis=1)
+    df['Opportunity'] = df['APR'].apply(get_opportunity_score)
     df['Trade Action'] = df.apply(get_trade_logic, axis=1)
     
-    # Sélection des colonnes sans les logos
-    df_display = df[['symbol', 'Variational', 'Hyperliquid', 'Lighter', 'Spread', 'Opportunity', 'Trade Action']].sort_values('Spread', ascending=False)
+    df_display = df[['symbol', 'Variational', 'Hyperliquid', 'Lighter', 'APR', 'Opportunity', 'Trade Action']].sort_values('APR', ascending=False)
 
-    # Styling
     def style_rows(row):
         styles = ['' for _ in row.index]
         vals = row[['Variational', 'Hyperliquid', 'Lighter']].astype(float)
@@ -99,48 +87,33 @@ if not df.empty:
 
     st.dataframe(
         df_display.style.apply(style_rows, axis=1).format({
-            'Variational': "{:.2f}%", 'Hyperliquid': "{:.2f}%", 'Lighter': "{:.2f}%", 'Spread': "{:.2f}%"
+            'Variational': "{:.2f}%", 'Hyperliquid': "{:.2f}%", 'Lighter': "{:.2f}%", 'APR': "{:.2f}%"
         }),
-        use_container_width=True, 
-        hide_index=True,
-        column_config={
-            "symbol": "Ticker",
-            "Variational": "Variational APR",
-            "Hyperliquid": "Hyperliquid APR",
-            "Lighter": "Lighter APR",
-            "Spread": "Max Spread"
-        }
+        use_container_width=True, hide_index=True
     )
-    st.success(f"Found {len(df)} arbitrage opportunities.")
 else:
     st.info("No arbitrage pairs found.")
 
-
-
-
 # --- FOOTER ---
+st.markdown("<br>", unsafe_allow_html=True)
 st.markdown("---")
-# Layout with two columns
 col_aff, col_social = st.columns([3, 1])
 
 with col_aff:
-    # Minimalist referral box with Dark Green accent
     st.markdown("""
-        <div style="background-color: rgba(255, 255, 255, 0.03); padding: 12px; border-radius: 8px; border-left: 4px solid #006400;">
+        <div style="background-color: rgba(255, 255, 255, 0.03); padding: 15px; border-radius: 8px; border-left: 4px solid #006400;">
             <p style="margin: 0; font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px;">Ready to trade?</p>
-            <p style="margin: 0; font-size: 15px; font-weight: 500;">
+            <p style="margin: 5px 0 10px 0; font-size: 15px; font-weight: 500;">
             </p>
             <a href="https://app.hyperliquid.xyz/join/CACA" target="_blank" style="color: #008000; text-decoration: none; font-weight: 600; font-size: 14px;">
-                Start trading on <b>Hyperliquid</b> to capture these spreads.→
-            </a>
+            Capture these spreads on Hyperliquid.            </a>
         </div>
     """, unsafe_allow_html=True)
 
 with col_social:
-    # Minimalist social links
     st.markdown(
         """
-        <div style="text-align: right; padding-top: 10px;">
+         <div style="text-align: right; padding-top: 10px;">
             <p style="margin-bottom: 8px; font-size: 12px; color: #666;">Developer</p>
             <a href="https://x.com/C0l1n503" target="_blank" style="text-decoration: none;">
                 <span style="color: #666; font-size: 12px; margin-right: 10px;">@C0l1n503</span>
