@@ -7,16 +7,16 @@ from streamlit_autorefresh import st_autorefresh
 st.set_page_config(page_title="Arbitrage Execution Map", layout="wide")
 
 # --- AUTO-REFRESH (Every 30 seconds) ---
-st_autorefresh(interval=30 * 1000, limit=None, key="funder_refresh")
+st_autorefresh(interval=120 * 1000, limit=None, key="funder_refresh")
 
 # API Endpoints
 VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
 HL_URL = "https://api.hyperliquid.xyz/info"
 LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=120)
 def fetch_data():
-    # 1. Variational
+    # 1. Variational (APR Annuel direct en décimal)
     try:
         r_var = requests.get(VAR_URL, timeout=5).json()
         df_var = pd.DataFrame(r_var['listings'])
@@ -24,21 +24,34 @@ def fetch_data():
         df_var = df_var[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
     except: df_var = pd.DataFrame(columns=['symbol', 'Variational'])
 
-    # 2. Hyperliquid (Corrected * 8)
+    # 2. Hyperliquid (CORRECTIF : Taux 8h -> APR Annuel)
     try:
         r_hl = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=5).json()
-        hl_data = [{'symbol': m['name'], 'Hyperliquid': float(r_hl[1][i]['funding']) * 8 * 3 * 365 * 100} for i, m in enumerate(r_hl[0]['universe'])]
+        # Le taux 'funding' de l'API HL est la moyenne sur 8 heures
+        # Pour correspondre au -143.51% du site : (Rate * 3 * 365) * 100
+        hl_data = [
+            {
+                'symbol': m['name'], 
+                'Hyperliquid': (float(r_hl[1][i]['funding']) * 3 * 365) * 100 * 8
+            } for i, m in enumerate(r_hl[0]['universe'])
+        ]
         df_hl = pd.DataFrame(hl_data)
     except: df_hl = pd.DataFrame(columns=['symbol', 'Hyperliquid'])
 
-    # 3. Lighter (Corrected * 8)
+    # 3. Lighter (Même logique de période 8h)
     try:
         r_li = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=5).json()
-        li_data = [{'symbol': i['symbol'].replace('1000',''), 'Lighter': float(i['rate']) * 8 * 3 * 365 * 100} for i in r_li.get('funding_rates', [])]
+        li_data = [
+            {
+                'symbol': i['symbol'].replace('1000',''), 
+                'Lighter': (float(i['rate']) * 3 * 365) * 100
+            } for i in r_li.get('funding_rates', [])
+        ]
         df_li = pd.DataFrame(li_data).groupby('symbol')['Lighter'].mean().reset_index()
     except: df_li = pd.DataFrame(columns=['symbol', 'Lighter'])
 
     return df_var, df_hl, df_li
+
 
 # --- LOGIC FUNCTIONS ---
 def get_trade_logic(row):
@@ -58,7 +71,7 @@ def get_opportunity_score(spread):
 # --- MAIN UI ---
 st.title("⚖️ Delta-Neutral Arbitrage Map")
 st.markdown("Trade Smarter: Real-time Execution Guide")
-st.caption("🔄 Data refreshes automatically every 30 seconds")
+st.caption("🔄 Data refreshes automatically every 2 minutes")
 
 df_var, df_hl, df_li = fetch_data()
 
