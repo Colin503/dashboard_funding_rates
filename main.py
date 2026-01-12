@@ -159,7 +159,7 @@ else:
     st.info("No arbitrage pairs found between the 4 exchanges.")
 
 # --- FOOTER ---
-st.markdown("<br>---", unsafe_allow_html=True)
+st.markdown("<br>", unsafe_allow_html=True)
 col_aff, col_social = st.columns([3, 1])
 
 with col_aff:
