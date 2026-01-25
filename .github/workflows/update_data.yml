@@ -1,0 +1,36 @@
+name: Update Funding History
+
+on:
+  schedule:
+    - cron: '*/20 * * * *'  # Lance toutes les 20 minutes
+  workflow_dispatch:      # Permet de lancer manuellement pour tester
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Autorise le bot à sauvegarder le fichier
+
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Installation de Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Installation des dépendances
+        run: pip install -r requirements.txt
+
+      - name: Exécution du Recorder
+        env:
+          EXT_API_KEY: ${{ secrets.EXT_API_KEY }}
+          PACIFICA_API_KEY: ${{ secrets.PACIFICA_API_KEY }}
+        run: python recorder.py
+
+      - name: Sauvegarde (Commit & Push)
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🤖 Auto-update funding history"
+          file_pattern: "funding_history.parquet"

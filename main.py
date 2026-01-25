@@ -1,6 +1,8 @@
 import streamlit as st
 import requests
 import pandas as pd
+import os
+from datetime import datetime, timedelta
 from streamlit_autorefresh import st_autorefresh
 
 # --- APP CONFIGURATION ---
@@ -16,8 +18,8 @@ LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
 EXT_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
 PAC_URL = "https://api.pacifica.fi/api/v1/info"
 
-EXT_API_KEY = "693ed8445baad0ae3b75c6d991bac4d9"
-PACIFICA_API_KEY = "5h53egePzL1aM958CXWs9x4oY7FbnammiC7YiX7XErvD3TYk9L214kqP6j8GJ6wTQbnQzAk4Mbzxfo7aGKzrzP9s"
+EXT_API_KEY = os.environ.get("EXT_API_KEY", "693ed8445baad0ae3b75c6d991bac4d9")
+PACIFICA_API_KEY = os.environ.get("PACIFICA_API_KEY", "5h53egePzL1aM958CXWs9x4oY7FbnammiC7YiX7XErvD3TYk9L214kqP6j8GJ6wTQbnQzAk4Mbzxfo7aGKzrzP9s")
 
 @st.cache_data(ttl=120)
 def fetch_data():
@@ -76,15 +78,47 @@ def fetch_data():
 
     return df_var, df_hl, df_li, df_ext, df_pac
 
-# --- SIDEBAR SETTINGS (EXCHANGE SELECTOR) ---
+# --- HISTORICAL DATA FUNCTIONS ---
+@st.cache_data(ttl=300) 
+def get_48h_averages():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "funding_history.parquet")
+    
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        return pd.DataFrame()
+
+    try:
+        df = pd.read_parquet(file_path, engine='pyarrow')
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            cutoff = datetime.now() - timedelta(hours=48)
+            df = df[df['timestamp'] >= cutoff]
+        
+        numeric_cols = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
+        existing_cols = [c for c in numeric_cols if c in df.columns]
+        
+        if not existing_cols:
+            return pd.DataFrame()
+            
+        # On calcule la moyenne par exchange pour l'utiliser plus tard
+        df_avg = df.groupby('symbol')[existing_cols].mean().reset_index()
+        # On renomme avec le suffixe _avg pour les identifier
+        df_avg = df_avg.rename(columns={c: f"{c}_avg" for c in existing_cols})
+        
+        return df_avg
+    except Exception:
+        return pd.DataFrame()
+
+# --- SIDEBAR SETTINGS ---
 st.sidebar.header("Exchanges Selection")
 all_exchanges = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
 selected_exchanges = []
 
-# Generate a checkbox for each exchange
 for ex in all_exchanges:
     if st.sidebar.checkbox(ex, value=True):
         selected_exchanges.append(ex)
+
+show_history = st.sidebar.checkbox("Show Pair 48h Avg", value=True)
 
 # --- LOGIC FUNCTIONS ---
 def get_trade_logic(row, active_cols):
@@ -100,50 +134,122 @@ def get_opportunity_score(spread):
     elif spread > 30: return "⚡ MEDIUM"
     return "❄️ LOW"
 
+# Nouvelle fonction pour calculer la moyenne de la paire
+def calculate_pair_history(row, active_cols):
+    # 1. Identifier qui est Long et qui est Short DANS LE LIVE
+    vals = row[active_cols].dropna()
+    if len(vals) < 2:
+        return None
+        
+    long_dex = vals.idxmin()  # Ex: 'Variational'
+    short_dex = vals.idxmax() # Ex: 'Extended'
+    
+    # 2. Récupérer les moyennes historiques correspondantes
+    # Les colonnes historiques s'appellent 'Variational_avg', etc.
+    long_hist_col = f"{long_dex}_avg"
+    short_hist_col = f"{short_dex}_avg"
+    
+    # 3. Vérifier si on a l'historique pour ces deux exchanges sur cette ligne
+    if long_hist_col in row and short_hist_col in row:
+        long_avg_val = row[long_hist_col]
+        short_avg_val = row[short_hist_col]
+        
+        if pd.notna(long_avg_val) and pd.notna(short_avg_val):
+            # Calcul du spread moyen historique : Moyenne Short - Moyenne Long
+            return short_avg_val - long_avg_val
+            
+    return None
+
 # --- MAIN UI ---
 st.title("⚖️ Delta-Neutral Arbitrage Map")
 st.markdown(f"Currently analyzing: **{', '.join(selected_exchanges)}**")
 
+df_history = get_48h_averages()
+has_history = not df_history.empty
+
 if len(selected_exchanges) < 2:
-    st.warning("Please check at least **two exchanges** in the sidebar to enable spread calculation.")
+    st.warning("Please check at least **two exchanges** in the sidebar.")
 else:
     df_var, df_hl, df_li, df_ext, df_pac = fetch_data()
 
-    # Merging
+    # Merges Live
     df = pd.merge(df_var, df_hl, on='symbol', how='outer')
     df = pd.merge(df, df_li, on='symbol', how='outer')
     df = pd.merge(df, df_ext, on='symbol', how='outer')
     df = pd.merge(df, df_pac, on='symbol', how='outer')
 
-    # Filter rows that have at least 2 prices among the CHECKED exchanges
+    # Merge History (On attache les moyennes brutes au dataframe)
+    if has_history:
+        df = pd.merge(df, df_history, on='symbol', how='left')
+
+    # Filtre Live
     df = df[df[selected_exchanges].notna().sum(axis=1) >= 2].copy()
 
     if not df.empty:
-        # Dynamic Calculations
+        # 1. Calculs Live
         df['APR Spread'] = df[selected_exchanges].max(axis=1) - df[selected_exchanges].min(axis=1)
         df['Opportunity'] = df['APR Spread'].apply(get_opportunity_score)
         df['Trade Action'] = df.apply(lambda row: get_trade_logic(row, selected_exchanges), axis=1)
         
-        # Sort and Display
-        display_cols = ['symbol'] + selected_exchanges + ['APR Spread', 'Opportunity', 'Trade Action']
-        df_final = df[display_cols].sort_values('APR Spread', ascending=False)
+        # 2. Calcul "Pair 48h Avg" (Seulement si demandé et dispo)
+        if show_history and has_history:
+            df['48h Pair Avg'] = df.apply(lambda row: calculate_pair_history(row, selected_exchanges), axis=1)
 
+        df_final = df.sort_values('APR Spread', ascending=False)
+        
+        # 3. Préparation de l'affichage
+        display_cols = ['symbol'] + selected_exchanges + ['APR Spread']
+        
+        # On insère la colonne moyenne juste après le spread actuel
+        if show_history and has_history and '48h Pair Avg' in df_final.columns:
+            display_cols.append('48h Pair Avg')
+            
+        display_cols += ['Opportunity', 'Trade Action']
+        
+        # Nettoyage
+        final_cols = [c for c in display_cols if c in df_final.columns]
+        
+        # Styling
+        # Styling
         def apply_styles(row):
             styles = ['' for _ in row.index]
-            vals = row[selected_exchanges].astype(float)
-            if vals.notna().sum() >= 2:
-                styles[row.index.get_loc(vals.idxmin())] = 'background-color: #006400; color: white'
-                styles[row.index.get_loc(vals.idxmax())] = 'background-color: #8B0000; color: white'
+            live_vals = row[selected_exchanges].astype(float)
+            
+            # 1. Couleurs Vert/Rouge pour Long/Short
+            if live_vals.notna().sum() >= 2:
+                min_idx = row.index.get_loc(live_vals.idxmin())
+                max_idx = row.index.get_loc(live_vals.idxmax())
+                styles[min_idx] = 'background-color: #006400; color: white'
+                styles[max_idx] = 'background-color: #8B0000; color: white'
+            
+            # 2. Logique "Or/Jaune" : Détection de divergence forte
+            if '48h Pair Avg' in row and pd.notna(row['48h Pair Avg']):
+                current_spread = row['APR Spread']
+                avg_spread = row['48h Pair Avg']
+                
+                spread_col_idx = row.index.get_loc('APR Spread')
+                
+                # Condition A : Inversion de signe (Positif <-> Négatif)
+                # Ex: Moyenne était -5% (Shorts payaient Longs) et maintenant +10% (Longs paient Shorts)
+                is_sign_flip = (current_spread > 0 and avg_spread < 0) or (current_spread < 0 and avg_spread > 0)
+                
+                # Condition B : Écart massif (ex: 2x la moyenne)
+                # On évite de flagger si on passe de 0.1% à 0.2% (bruit), donc on demande un min de 5% d'écart
+                is_huge_diff = abs(current_spread - avg_spread) > 5 and abs(current_spread) > abs(avg_spread) * 2
+
+                if is_sign_flip or is_huge_diff:
+                     styles[spread_col_idx] = 'color: #FFD700; font-weight: bold; background-color: #333300' 
+
             return styles
 
         st.dataframe(
-            df_final.style.apply(apply_styles, axis=1).format({
-                ex: "{:.2f}%" for ex in selected_exchanges + ['APR Spread']
+            df_final[final_cols].style.apply(apply_styles, axis=1).format({
+                c: "{:.2f}%" for c in final_cols if c not in ['symbol', 'Opportunity', 'Trade Action']
             }),
             use_container_width=True, hide_index=True
         )
     else:
-        st.info("No common pairs found between the checked exchanges.")
+        st.info("No common pairs found.")
 
 # --- FOOTER ---
 st.markdown("<br>", unsafe_allow_html=True)
