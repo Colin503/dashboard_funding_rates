@@ -1,10 +1,13 @@
 name: Update Funding History
 
 on:
+  push:                  # <--- NOUVEAU : Lance le script dès qu'on push !
+    branches:
+      - main
   schedule:
-    - cron: '*/30 * * * *'  # Lance toutes les 30 minutes
-  workflow_dispatch:      # Permet de lancer manuellement pour tester
-
+    - cron: '*/30 * * * *' # On garde le programmateur pour plus tard
+  workflow_dispatch:     # On garde le bouton manuel
+  
 jobs:
   update-data:
     runs-on: ubuntu-latest
