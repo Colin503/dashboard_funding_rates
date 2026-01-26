@@ -2,7 +2,7 @@ name: Update Funding History
 
 on:
   schedule:
-    - cron: '*/20 * * * *'  # Lance toutes les 20 minutes
+    - cron: '*/30 * * * *'  # Lance toutes les 30 minutes
   workflow_dispatch:      # Permet de lancer manuellement pour tester
 
 jobs:
