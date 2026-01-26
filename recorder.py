@@ -2,10 +2,9 @@ import pandas as pd
 import requests
 import datetime
 import os
-import sys
 
-# --- CONFIGURATION SÉCURISÉE ---
-# Sur GitHub, les clés sont lues depuis les variables d'environnement (Secrets)
+# --- CONFIGURATION ---
+# Sur GitHub, les clés sont lues via les "Secrets" (Variables d'environnement)
 EXT_API_KEY = os.environ.get("EXT_API_KEY")
 PACIFICA_API_KEY = os.environ.get("PACIFICA_API_KEY")
 FILE_NAME = "funding_history.parquet"
@@ -18,6 +17,8 @@ EXT_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
 PAC_URL = "https://api.pacifica.fi/api/v1/info"
 
 def fetch_all_rates():
+    print(f"🔄 Récupération des données... {datetime.datetime.now()}")
+    
     # 1. Variational
     try:
         r_var = requests.get(VAR_URL, timeout=10).json()
@@ -81,7 +82,6 @@ def fetch_all_rates():
     return df
 
 def save_to_parquet(df_new):
-    # Chemin absolu
     file_path = os.path.join(os.getcwd(), FILE_NAME)
 
     if os.path.exists(file_path):
@@ -89,12 +89,12 @@ def save_to_parquet(df_new):
             df_old = pd.read_parquet(file_path)
             df_combined = pd.concat([df_old, df_new], ignore_index=True)
             
-            # --- NETTOYAGE (Garder 7 jours) ---
+            # --- NETTOYAGE (Garder 7 jours glissants) ---
             if 'timestamp' in df_combined.columns:
                 df_combined['timestamp'] = pd.to_datetime(df_combined['timestamp'])
                 cutoff_date = datetime.datetime.now() - datetime.timedelta(days=7)
                 df_combined = df_combined[df_combined['timestamp'] > cutoff_date]
-            # ----------------------------------
+            # --------------------------------------------
 
             df_combined.to_parquet(file_path, engine='pyarrow', compression='snappy')
             print(f"✅ Historique mis à jour ! Total lignes : {len(df_combined)}")
@@ -106,11 +106,11 @@ def save_to_parquet(df_new):
         print(f"✅ Nouveau fichier créé.")
 
 if __name__ == "__main__":
-    print("🚀 Démarrage du script GitHub Action (One-Shot)...")
+    print("🚀 Script lancé par GitHub Action...")
     
-    # Petite sécurité
-    if not EXT_API_KEY: print("⚠️ Warning: EXT_API_KEY introuvable.")
-    if not PACIFICA_API_KEY: print("⚠️ Warning: PACIFICA_API_KEY introuvable.")
+    # Vérification des clés
+    if not EXT_API_KEY: print("⚠️ Warning: EXT_API_KEY manquante.")
+    if not PACIFICA_API_KEY: print("⚠️ Warning: PACIFICA_API_KEY manquante.")
 
     df = fetch_all_rates()
     if not df.empty:
@@ -118,4 +118,4 @@ if __name__ == "__main__":
     else:
         print("⚠️ Aucune donnée récupérée.")
     
-    print("🏁 Fin du script.")
+    print("🏁 Fin du script (Arrêt propre).")
