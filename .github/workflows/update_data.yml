@@ -1,18 +1,15 @@
 name: Update Funding History
 
 on:
-  push:                  # <--- NOUVEAU : Lance le script dès qu'on push !
-    branches:
-      - main
   schedule:
-    - cron: '*/30 * * * *' # On garde le programmateur pour plus tard
-  workflow_dispatch:     # On garde le bouton manuel
-  
+    - cron: '*/20 * * * *'  # Lance le script à la minute 0, 20 et 40
+  workflow_dispatch:      # Permet de lancer manuellement pour tester
+
 jobs:
   update-data:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Autorise le bot à sauvegarder le fichier
+      contents: write  # Donne le droit au robot de sauvegarder le fichier parquet
 
     steps:
       - name: Récupération du code
@@ -23,16 +20,17 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Installation des dépendances
+      - name: Installation des librairies
         run: pip install -r requirements.txt
 
-      - name: Exécution du Recorder
+      - name: Lancement du Recorder
         env:
+          # On injecte les clés secrètes ici
           EXT_API_KEY: ${{ secrets.EXT_API_KEY }}
           PACIFICA_API_KEY: ${{ secrets.PACIFICA_API_KEY }}
         run: python recorder.py
 
-      - name: Sauvegarde (Commit & Push)
+      - name: Sauvegarde et Push (Commit)
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "🤖 Auto-update funding history"
