@@ -1,9 +1,12 @@
 name: Update Funding History
 
 on:
+  push:
+    branches:
+      - main
   schedule:
-    - cron: '*/20 * * * *'  # Lance le script à la minute 0, 20 et 40
-  workflow_dispatch:      # Permet de lancer manuellement pour tester
+    - cron: '*/5 * * * *'  # <-- On tente toutes les 5 minutes
+  workflow_dispatch:
 
 jobs:
   update-data:
