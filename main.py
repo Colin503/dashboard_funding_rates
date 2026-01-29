@@ -89,10 +89,14 @@ def get_48h_averages():
 
     try:
         df = pd.read_parquet(file_path, engine='pyarrow')
-        if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            cutoff = datetime.now() - timedelta(hours=48)
-            df = df[df['timestamp'] >= cutoff]
+        
+        # --- MODIFICATION : On garde tout l'historique pour l'instant ---
+        # On désactive le filtre des 48h pour forcer l'affichage des données récentes
+        # if 'timestamp' in df.columns:
+        #    df['timestamp'] = pd.to_datetime(df['timestamp'])
+        #    cutoff = datetime.now() - timedelta(hours=48)
+        #    df = df[df['timestamp'] >= cutoff]
+        # ---------------------------------------------------------------
         
         numeric_cols = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
         existing_cols = [c for c in numeric_cols if c in df.columns]
@@ -100,13 +104,16 @@ def get_48h_averages():
         if not existing_cols:
             return pd.DataFrame()
             
-        # On calcule la moyenne par exchange pour l'utiliser plus tard
+        # On calcule la moyenne de TOUT ce qu'on a dans le fichier
         df_avg = df.groupby('symbol')[existing_cols].mean().reset_index()
-        # On renomme avec le suffixe _avg pour les identifier
+        
+        # On renomme avec le suffixe _avg
         df_avg = df_avg.rename(columns={c: f"{c}_avg" for c in existing_cols})
         
         return df_avg
-    except Exception:
+    except Exception as e:
+        # Petit print pour voir l'erreur dans les logs si besoin
+        print(f"Erreur lecture historique: {e}") 
         return pd.DataFrame()
 
 # --- SIDEBAR SETTINGS ---
