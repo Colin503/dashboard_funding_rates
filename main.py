@@ -81,38 +81,26 @@ def fetch_data():
 # --- HISTORICAL DATA FUNCTIONS ---
 @st.cache_data(ttl=300) 
 def get_48h_averages():
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(current_dir, "funding_history.parquet")
+    # --- CHANGEMENT ICI : On utilise l'URL "RAW" de GitHub ---
+    # Cela force Streamlit à aller chercher la toute dernière version en ligne
+    url = "https://github.com/Colin503/dashboard_funding_rates/raw/main/funding_history.parquet"
     
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return pd.DataFrame()
-
     try:
-        df = pd.read_parquet(file_path, engine='pyarrow')
+        # Pandas est magique, il peut lire directement une URL
+        df = pd.read_parquet(url, engine='pyarrow')
         
-        # --- MODIFICATION : On garde tout l'historique pour l'instant ---
-        # On désactive le filtre des 48h pour forcer l'affichage des données récentes
-        # if 'timestamp' in df.columns:
-        #    df['timestamp'] = pd.to_datetime(df['timestamp'])
-        #    cutoff = datetime.now() - timedelta(hours=48)
-        #    df = df[df['timestamp'] >= cutoff]
-        # ---------------------------------------------------------------
-        
+        # --- (Le reste du code reste identique, sans le filtre de date) ---
         numeric_cols = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
         existing_cols = [c for c in numeric_cols if c in df.columns]
         
         if not existing_cols:
             return pd.DataFrame()
             
-        # On calcule la moyenne de TOUT ce qu'on a dans le fichier
         df_avg = df.groupby('symbol')[existing_cols].mean().reset_index()
-        
-        # On renomme avec le suffixe _avg
         df_avg = df_avg.rename(columns={c: f"{c}_avg" for c in existing_cols})
         
         return df_avg
     except Exception as e:
-        # Petit print pour voir l'erreur dans les logs si besoin
         print(f"Erreur lecture historique: {e}") 
         return pd.DataFrame()
 
