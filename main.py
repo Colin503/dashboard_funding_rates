@@ -1,250 +1,318 @@
 import streamlit as st
 import requests
 import pandas as pd
+import concurrent.futures
+from streamlit_autorefresh import st_autorefresh
+import time
 import os
 from datetime import datetime, timedelta
-from streamlit_autorefresh import st_autorefresh
 
-# --- APP CONFIGURATION ---
-st.set_page_config(page_title="Arbitrage Execution Map", layout="wide")
+# --- GLOBAL CONFIGURATION ---
+st.set_page_config(
+    page_title="Funding Terminal", 
+    layout="wide", 
+    page_icon="⚡"
+)
 
-# --- AUTO-REFRESH (Every 2 minutes) ---
-st_autorefresh(interval=120 * 1000, limit=None, key="funder_refresh")
+# Global Auto-refresh (Every 2 minutes)
+st_autorefresh(interval=120 * 1000, key="global_refresh")
 
-# --- API CONFIGURATION ---
-VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
-HL_URL = "https://api.hyperliquid.xyz/info"
-LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
-EXT_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
-PAC_URL = "https://api.pacifica.fi/api/v1/info"
+# Global CSS (Green Progress Bars)
+st.markdown("""
+    <style>
+    .stProgress > div > div > div > div { background-color: #00E599; }
+    </style>
+""", unsafe_allow_html=True)
 
-EXT_API_KEY = os.environ.get("EXT_API_KEY", "693ed8445baad0ae3b75c6d991bac4d9")
-PACIFICA_API_KEY = os.environ.get("PACIFICA_API_KEY", "5h53egePzL1aM958CXWs9x4oY7FbnammiC7YiX7XErvD3TYk9L214kqP6j8GJ6wTQbnQzAk4Mbzxfo7aGKzrzP9s")
-
-@st.cache_data(ttl=120)
-def fetch_data():
-    # 1. Variational
-    try:
-        r_var = requests.get(VAR_URL, timeout=5).json()
-        df_var = pd.DataFrame(r_var['listings'])
-        df_var['Variational'] = pd.to_numeric(df_var['funding_rate']) * 100
-        df_var = df_var[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
-    except: df_var = pd.DataFrame(columns=['symbol', 'Variational'])
-
-    # 2. Hyperliquid
-    try:
-        r_hl = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=5).json()
-        hl_data = [
-            {'symbol': m['name'], 'Hyperliquid': (float(r_hl[1][i]['funding']) * 3 * 365) * 100 * 8} 
-            for i, m in enumerate(r_hl[0]['universe'])
-        ]
-        df_hl = pd.DataFrame(hl_data)
-    except: df_hl = pd.DataFrame(columns=['symbol', 'Hyperliquid'])
-
-    # 3. Lighter
-    try:
-        r_li = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=5).json()
-        li_data = [
-            {'symbol': i['symbol'].replace('1000',''), 'Lighter': (float(i['rate']) * 3 * 365) * 100} 
-            for i in r_li.get('funding_rates', [])
-        ]
-        df_li = pd.DataFrame(li_data).groupby('symbol')['Lighter'].mean().reset_index()
-    except: df_li = pd.DataFrame(columns=['symbol', 'Lighter'])
-
-    # 4. Extended
-    try:
-        headers = {"X-Api-Key": EXT_API_KEY, "User-Agent": "Mozilla/5.0"}
-        r_ext = requests.get(EXT_URL, headers=headers, timeout=5).json()
-        ext_data = []
-        for item in r_ext.get('data', []):
-            stats = item.get('marketStats', {})
-            sym = item.get('name', '').split('-')[0]
-            rate = float(stats.get('fundingRate', 0))
-            ext_data.append({'symbol': sym, 'Extended': rate * 24 * 365 * 100})
-        df_ext = pd.DataFrame(ext_data)
-    except: df_ext = pd.DataFrame(columns=['symbol', 'Extended'])
-
-    # 5. Pacifica
-    try:
-        headers_pac = {"X-Api-Key": PACIFICA_API_KEY, "User-Agent": "Mozilla/5.0"}
-        r_pac = requests.get(PAC_URL, headers=headers_pac, timeout=5).json()
-        pac_data = []
-        for item in r_pac.get('data', []):
-            rate = float(item.get('next_funding_rate', 0))
-            annual_apr = rate * 24 * 365 * 100
-            pac_data.append({'symbol': item.get('symbol', '').replace('-USD', ''), 'Pacifica': annual_apr})
-        df_pac = pd.DataFrame(pac_data)
-    except: df_pac = pd.DataFrame(columns=['symbol', 'Pacifica'])
-
-    return df_var, df_hl, df_li, df_ext, df_pac
-
-# --- HISTORICAL DATA FUNCTIONS ---
-@st.cache_data(ttl=300) 
-def get_48h_averages():
-    # --- CHANGEMENT ICI : On utilise l'URL "RAW" de GitHub ---
-    # Cela force Streamlit à aller chercher la toute dernière version en ligne
-    url = "https://github.com/Colin503/dashboard_funding_rates/raw/main/funding_history.parquet"
-    
-    try:
-        # Pandas est magique, il peut lire directement une URL
-        df = pd.read_parquet(url, engine='pyarrow')
-        
-        # --- (Le reste du code reste identique, sans le filtre de date) ---
-        numeric_cols = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
-        existing_cols = [c for c in numeric_cols if c in df.columns]
-        
-        if not existing_cols:
-            return pd.DataFrame()
-            
-        df_avg = df.groupby('symbol')[existing_cols].mean().reset_index()
-        df_avg = df_avg.rename(columns={c: f"{c}_avg" for c in existing_cols})
-        
-        return df_avg
-    except Exception as e:
-        print(f"Erreur lecture historique: {e}") 
-        return pd.DataFrame()
-
-# --- SIDEBAR SETTINGS ---
-st.sidebar.header("Exchanges Selection")
-all_exchanges = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
-selected_exchanges = []
-
-for ex in all_exchanges:
-    if st.sidebar.checkbox(ex, value=True):
-        selected_exchanges.append(ex)
-
-show_history = st.sidebar.checkbox("Show Pair 48h Avg", value=True)
-
-# --- LOGIC FUNCTIONS ---
-def get_trade_logic(row, active_cols):
-    vals = row[active_cols].dropna()
-    if len(vals) >= 2:
-        low_dex = vals.idxmin()
-        high_dex = vals.idxmax()
-        return f"🟢 LONG {low_dex} / 🔴 SHORT {high_dex}"
-    return "N/A"
+# ==============================================================================
+#                               HELPER FUNCTIONS
+# ==============================================================================
+def safe_float(value):
+    if value is None: return 0.0
+    try: return float(value)
+    except: return 0.0
 
 def get_opportunity_score(spread):
     if spread > 100: return "🔥 HIGH"
     elif spread > 30: return "⚡ MEDIUM"
     return "❄️ LOW"
 
-# Nouvelle fonction pour calculer la moyenne de la paire
-def calculate_pair_history(row, active_cols):
-    # 1. Identifier qui est Long et qui est Short DANS LE LIVE
-    vals = row[active_cols].dropna()
-    if len(vals) < 2:
-        return None
-        
-    long_dex = vals.idxmin()  # Ex: 'Variational'
-    short_dex = vals.idxmax() # Ex: 'Extended'
+# ==============================================================================
+#                               PAGE 1 : HIP-3 (BUILDERS ARBITRAGE)
+# ==============================================================================
+def render_hip3_page():
+    st.markdown("## 🏗️ HIP-3 Arbitrage")
     
-    # 2. Récupérer les moyennes historiques correspondantes
-    # Les colonnes historiques s'appellent 'Variational_avg', etc.
-    long_hist_col = f"{long_dex}_avg"
-    short_hist_col = f"{short_dex}_avg"
+    HL_INFO_URL = "https://api.hyperliquid.xyz/info"
     
-    # 3. Vérifier si on a l'historique pour ces deux exchanges sur cette ligne
-    if long_hist_col in row and short_hist_col in row:
-        long_avg_val = row[long_hist_col]
-        short_avg_val = row[short_hist_col]
-        
-        if pd.notna(long_avg_val) and pd.notna(short_avg_val):
-            # Calcul du spread moyen historique : Moyenne Short - Moyenne Long
-            return short_avg_val - long_avg_val
+    # Builder Name Mapping
+    BUILDER_MAPPING = {
+        "km": "Kinetiq Markets", "xyz": "Trade[xyz]", "flx": "Felix",
+        "hyna": "HyENA", "vntl": "Ventuals", "cash": "Dreamcash",
+        "abcd": "ABCD"
+    }
+
+    def get_underlying(symbol):
+        if ':' in symbol: return symbol.split(':')[-1]
+        return symbol
+
+    @st.cache_data(ttl=60)
+    def fetch_and_pivot_hip3():
+        try:
+            dexs_resp = requests.post(HL_INFO_URL, json={"type": "perpDexs"}, timeout=5).json()
+            all_assets = []
+
+            def fetch_dex(dex_info):
+                if dex_info is None: return []
+                builder_name = dex_info.get('name')
+                if not builder_name or builder_name == "test": return []
+                try:
+                    time.sleep(0.05)
+                    r = requests.post(HL_INFO_URL, json={"type": "metaAndAssetCtxs", "dex": builder_name}, timeout=10).json()
+                    if not r or len(r) < 2: return []
+                    universe, context = r[0]['universe'], r[1]
+                    rows = []
+                    for i, asset in enumerate(universe):
+                        ctx = context[i] if i < len(context) else {}
+                        funding_apr = safe_float(ctx.get('funding')) * 24 * 365 * 100
+                        rows.append({
+                            "Builder": builder_name,
+                            "Symbol": get_underlying(asset['name']),
+                            "Funding APR": funding_apr
+                        })
+                    return rows
+                except: return []
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                results = list(executor.map(fetch_dex, dexs_resp))
+            for res in results: all_assets.extend(res)
             
-    return None
-
-# --- MAIN UI ---
-st.title("⚖️ Delta-Neutral Arbitrage Map")
-st.markdown(f"Currently analyzing: **{', '.join(selected_exchanges)}**")
-
-df_history = get_48h_averages()
-has_history = not df_history.empty
-
-if len(selected_exchanges) < 2:
-    st.warning("Please check at least **two exchanges** in the sidebar.")
-else:
-    df_var, df_hl, df_li, df_ext, df_pac = fetch_data()
-
-    # Merges Live
-    df = pd.merge(df_var, df_hl, on='symbol', how='outer')
-    df = pd.merge(df, df_li, on='symbol', how='outer')
-    df = pd.merge(df, df_ext, on='symbol', how='outer')
-    df = pd.merge(df, df_pac, on='symbol', how='outer')
-
-    # Merge History (On attache les moyennes brutes au dataframe)
-    if has_history:
-        df = pd.merge(df, df_history, on='symbol', how='left')
-
-    # Filtre Live
-    df = df[df[selected_exchanges].notna().sum(axis=1) >= 2].copy()
-
-    if not df.empty:
-        # 1. Calculs Live
-        df['APR Spread'] = df[selected_exchanges].max(axis=1) - df[selected_exchanges].min(axis=1)
-        df['Opportunity'] = df['APR Spread'].apply(get_opportunity_score)
-        df['Trade Action'] = df.apply(lambda row: get_trade_logic(row, selected_exchanges), axis=1)
-        
-        # 2. Calcul "Pair 48h Avg" (Seulement si demandé et dispo)
-        if show_history and has_history:
-            df['48h Pair Avg'] = df.apply(lambda row: calculate_pair_history(row, selected_exchanges), axis=1)
-
-        df_final = df.sort_values('APR Spread', ascending=False)
-        
-        # 3. Préparation de l'affichage
-        display_cols = ['symbol'] + selected_exchanges + ['APR Spread']
-        
-        # On insère la colonne moyenne juste après le spread actuel
-        if show_history and has_history and '48h Pair Avg' in df_final.columns:
-            display_cols.append('48h Pair Avg')
+            df = pd.DataFrame(all_assets)
+            if df.empty: return pd.DataFrame()
             
-        display_cols += ['Opportunity', 'Trade Action']
+            df_pivot = df.pivot_table(index='Symbol', columns='Builder', values='Funding APR', aggfunc='mean')
+            return df_pivot.rename(columns=BUILDER_MAPPING)
+        except Exception as e:
+            st.error(f"HIP-3 API Error: {e}")
+            return pd.DataFrame()
+
+    # --- HIP-3 UI ---
+    df_matrix = fetch_and_pivot_hip3()
+    
+    if not df_matrix.empty:
+        # --- FILTERS SECTION ---
+        st.sidebar.subheader("🔎 Builders Filters")
         
-        # Nettoyage
-        final_cols = [c for c in display_cols if c in df_final.columns]
+        all_builders = list(df_matrix.columns)
+        selected_builders = []
         
+        # Boucle simple : une case par builder, cochée par défaut
+        for b in all_builders:
+            if st.sidebar.checkbox(b, value=True, key=f"h3_{b}"):
+                selected_builders.append(b)
+            
+        if len(selected_builders) < 2:
+            st.warning("Please select at least 2 builders.")
+            return
+
+        # --- DATA PROCESSING ---
+        df_sel = df_matrix[selected_builders].dropna(thresh=2).copy()
+        df_sel['APR Spread'] = df_sel.max(axis=1) - df_sel.min(axis=1)
+        
+        def get_trade_action(row):
+            vals = row[selected_builders].dropna()
+            if len(vals) < 2: return "-"
+            return f"🟢 LONG {vals.idxmin()} / 🔴 SHORT {vals.idxmax()}"
+
+        df_sel['Trade Action'] = df_sel.apply(get_trade_action, axis=1)
+        
+        # Sort only (No filtering on spread or rows limit)
+        df_final = df_sel.sort_values('APR Spread', ascending=False)
+
+        st.write(f"Active Comparison: **{', '.join(selected_builders)}**")
+
+        # Column Config
+        col_config = {b: st.column_config.NumberColumn(b, format="%.2f%%", width="small") for b in selected_builders}
+        col_config["APR Spread"] = st.column_config.NumberColumn("Spread", format="%.2f%%", width="small")
+        col_config["Trade Action"] = st.column_config.TextColumn("Trade Action", width="large")
+
         # Styling
-        # Styling
-        def apply_styles(row):
+        def style_hip3(row):
             styles = ['' for _ in row.index]
-            live_vals = row[selected_exchanges].astype(float)
-            
-            # 1. Couleurs Vert/Rouge pour Long/Short
-            if live_vals.notna().sum() >= 2:
-                min_idx = row.index.get_loc(live_vals.idxmin())
-                max_idx = row.index.get_loc(live_vals.idxmax())
-                styles[min_idx] = 'background-color: #006400; color: white'
-                styles[max_idx] = 'background-color: #8B0000; color: white'
-            
-            # 2. Logique "Or/Jaune" : Détection de divergence forte
-            if '48h Pair Avg' in row and pd.notna(row['48h Pair Avg']):
-                current_spread = row['APR Spread']
-                avg_spread = row['48h Pair Avg']
-                
-                spread_col_idx = row.index.get_loc('APR Spread')
-                
-                # Condition A : Inversion de signe (Positif <-> Négatif)
-                # Ex: Moyenne était -5% (Shorts payaient Longs) et maintenant +10% (Longs paient Shorts)
-                is_sign_flip = (current_spread > 0 and avg_spread < 0) or (current_spread < 0 and avg_spread > 0)
-                
-                # Condition B : Écart massif (ex: 2x la moyenne)
-                # On évite de flagger si on passe de 0.1% à 0.2% (bruit), donc on demande un min de 5% d'écart
-                is_huge_diff = abs(current_spread - avg_spread) > 5 and abs(current_spread) > abs(avg_spread) * 2
-
-                if is_sign_flip or is_huge_diff:
-                     styles[spread_col_idx] = 'color: #FFD700; font-weight: bold; background-color: #333300' 
-
+            vals = row[selected_builders]
+            if vals.count() >= 2:
+                styles[row.index.get_loc(vals.idxmin())] = 'background-color: #006400; color: white; font-weight: bold;'
+                styles[row.index.get_loc(vals.idxmax())] = 'background-color: #8B0000; color: white; font-weight: bold;'
+            if row['APR Spread'] > 100:
+                styles[row.index.get_loc('APR Spread')] = 'color: #FFD700; font-weight: bold;'
             return styles
 
         st.dataframe(
-            df_final[final_cols].style.apply(apply_styles, axis=1).format({
+            df_final.style.apply(style_hip3, axis=1).format({c: "{:.2f}%" for c in selected_builders + ['APR Spread']}, na_rep="-"),
+            use_container_width=True, 
+            height=min((len(df_final)+1)*35+3, 1000),
+            column_order=selected_builders + ['APR Spread', 'Trade Action'],
+            column_config=col_config
+        )
+    else:
+        st.info("Loading HIP-3 Data...")
+
+# ==============================================================================
+#                               PAGE 2 : MAINNET (MULTI-DEX)
+# ==============================================================================
+def render_mainnet_page():
+    st.markdown("## 🌐 Multi-DEX Arbitrage")
+    
+    VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
+    HL_URL = "https://api.hyperliquid.xyz/info"
+    LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
+    EXT_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
+    PAC_URL = "https://api.pacifica.fi/api/v1/info"
+
+    EXT_API_KEY = os.environ.get("EXT_API_KEY", "693ed8445baad0ae3b75c6d991bac4d9")
+    PACIFICA_API_KEY = os.environ.get("PACIFICA_API_KEY", "5h53egePzL1aM958CXWs9x4oY7FbnammiC7YiX7XErvD3TYk9L214kqP6j8GJ6wTQbnQzAk4Mbzxfo7aGKzrzP9s")
+
+    @st.cache_data(ttl=120)
+    def fetch_mainnet_data():
+        def get_var():
+            try:
+                r = requests.get(VAR_URL, timeout=3).json()
+                df = pd.DataFrame(r['listings'])
+                df['Variational'] = pd.to_numeric(df['funding_rate']) * 100
+                return df[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
+            except: return pd.DataFrame(columns=['symbol', 'Variational'])
+
+        def get_hl():
+            try:
+                r = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=3).json()
+                data = [{'symbol': m['name'], 'Hyperliquid': (float(r[1][i]['funding']) * 3 * 365 * 100 * 8)} for i, m in enumerate(r[0]['universe'])]
+                return pd.DataFrame(data)
+            except: return pd.DataFrame(columns=['symbol', 'Hyperliquid'])
+
+        def get_lighter():
+            try:
+                r = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=3).json()
+                data = [{'symbol': i['symbol'].replace('1000',''), 'Lighter': (float(i['rate']) * 3 * 365 * 100)} for i in r.get('funding_rates', [])]
+                if data: return pd.DataFrame(data).groupby('symbol')['Lighter'].mean().reset_index()
+                return pd.DataFrame(columns=['symbol', 'Lighter'])
+            except: return pd.DataFrame(columns=['symbol', 'Lighter'])
+
+        def get_ext():
+            try:
+                r = requests.get(EXT_URL, headers={"X-Api-Key": EXT_API_KEY}, timeout=3).json()
+                data = [{'symbol': i['name'].split('-')[0], 'Extended': float(i['marketStats']['fundingRate']) * 24 * 365 * 100} for i in r.get('data', [])]
+                return pd.DataFrame(data)
+            except: return pd.DataFrame(columns=['symbol', 'Extended'])
+
+        def get_pac():
+            try:
+                r = requests.get(PAC_URL, headers={"X-Api-Key": PACIFICA_API_KEY}, timeout=3).json()
+                data = [{'symbol': i['symbol'].replace('-USD',''), 'Pacifica': float(i['next_funding_rate']) * 24 * 365 * 100} for i in r.get('data', [])]
+                return pd.DataFrame(data)
+            except: return pd.DataFrame(columns=['symbol', 'Pacifica'])
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            f_var, f_hl = executor.submit(get_var), executor.submit(get_hl)
+            f_li, f_ext = executor.submit(get_lighter), executor.submit(get_ext)
+            f_pac = executor.submit(get_pac)
+            return f_var.result(), f_hl.result(), f_li.result(), f_ext.result(), f_pac.result()
+
+    @st.cache_data(ttl=300) 
+    def get_48h_averages():
+        url = "https://raw.githubusercontent.com/Colin503/dashboard_funding_rates/main/funding_history.parquet"
+        try:
+            df = pd.read_parquet(url, engine='pyarrow')
+            cols = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
+            existing = [c for c in cols if c in df.columns]
+            if not existing: return pd.DataFrame()
+            df_avg = df.groupby('symbol')[existing].mean().reset_index()
+            return df_avg.rename(columns={c: f"{c}_avg" for c in existing})
+        except: return pd.DataFrame()
+
+    st.sidebar.subheader("🔎 Mainnet Filters")
+    exchanges = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
+    selected_ex = [e for e in exchanges if st.sidebar.checkbox(e, value=True, key=f"main_{e}")]
+    show_history = st.sidebar.checkbox("Show Pair 48h Avg", value=True)
+
+    if len(selected_ex) < 2:
+        st.warning("Please select at least 2 exchanges.")
+        return
+
+    df_var, df_hl, df_li, df_ext, df_pac = fetch_mainnet_data()
+    df = pd.merge(df_var, df_hl, on='symbol', how='outer')
+    for d in [df_li, df_ext, df_pac]: df = pd.merge(df, d, on='symbol', how='outer')
+
+    df_hist = get_48h_averages()
+    has_history = not df_hist.empty
+    if has_history: df = pd.merge(df, df_hist, on='symbol', how='left')
+
+    df_live = df[df[selected_ex].notna().sum(axis=1) >= 2].copy()
+
+    if not df_live.empty:
+        df_live['APR Spread'] = df_live[selected_ex].max(axis=1) - df_live[selected_ex].min(axis=1)
+        df_live['Opportunity'] = df_live['APR Spread'].apply(get_opportunity_score)
+        
+        def get_main_trade(row):
+            vals = row[selected_ex].dropna()
+            return f"🟢 LONG {vals.idxmin()} / 🔴 SHORT {vals.idxmax()}"
+        df_live['Trade Action'] = df_live.apply(get_main_trade, axis=1)
+
+        def calc_pair_history(row):
+            vals = row[selected_ex].dropna()
+            if len(vals) < 2: return None
+            long, short = vals.idxmin(), vals.idxmax()
+            l_hist, s_hist = f"{long}_avg", f"{short}_avg"
+            if l_hist in row and s_hist in row and pd.notna(row[l_hist]) and pd.notna(row[s_hist]):
+                return row[s_hist] - row[l_hist]
+            return None
+
+        if show_history and has_history:
+            df_live['48h Pair Avg'] = df_live.apply(calc_pair_history, axis=1)
+
+        df_final = df_live.sort_values('APR Spread', ascending=False)
+
+        cols = ['symbol'] + selected_ex + ['APR Spread']
+        if show_history and has_history and '48h Pair Avg' in df_final.columns: cols.append('48h Pair Avg')
+        cols += ['Opportunity', 'Trade Action']
+        final_cols = [c for c in cols if c in df_final.columns]
+
+        def style_main(row):
+            styles = ['' for _ in row.index]
+            vals = row[selected_ex].astype(float)
+            if vals.notna().sum() >= 2:
+                styles[row.index.get_loc(vals.idxmin())] = 'background-color: #006400; color: white'
+                styles[row.index.get_loc(vals.idxmax())] = 'background-color: #8B0000; color: white'
+            
+            if '48h Pair Avg' in row and pd.notna(row['48h Pair Avg']):
+                curr, avg = row['APR Spread'], row['48h Pair Avg']
+                flip = (curr > 0 and avg < 0) or (curr < 0 and avg > 0)
+                diff = abs(curr - avg) > 5 and abs(curr) > abs(avg) * 2
+                if flip or diff:
+                    styles[row.index.get_loc('APR Spread')] = 'color: #FFD700; font-weight: bold; background-color: #333300'
+            return styles
+
+        st.dataframe(
+            df_final[final_cols].style.apply(style_main, axis=1).format({
                 c: "{:.2f}%" for c in final_cols if c not in ['symbol', 'Opportunity', 'Trade Action']
-            }),
-            use_container_width=True, hide_index=True
+            }, na_rep="-"),
+            use_container_width=True, hide_index=True,
+            column_config={"Trade Action": st.column_config.TextColumn("Trade Action", width="large")}
         )
     else:
         st.info("No common pairs found.")
+
+# ==============================================================================
+#                               SIDEBAR NAVIGATION
+# ==============================================================================
+
+st.sidebar.title("🧭 Navigation")
+page = st.sidebar.radio("Select Dashboard:", ["HIP-3", "Multi-DEX"])
+st.sidebar.markdown("---")
+
+if page == "HIP-3":
+    render_hip3_page()
+else:
+    render_mainnet_page()
 
 # --- FOOTER ---
 st.markdown("<br>", unsafe_allow_html=True)
