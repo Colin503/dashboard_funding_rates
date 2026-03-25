@@ -6,7 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 import time
 import os
 from datetime import datetime, timedelta
-from dune_client.client import DuneClient
+
 
 # --- GLOBAL CONFIGURATION ---
 st.set_page_config(
@@ -339,13 +339,5 @@ with col_social:
         </div>
     """, unsafe_allow_html=True)
 
-dune = DuneClient("BYna7yKLntJOKTyA0WxPDGC2RGhPPdMv")
-# df = pd.read_parquet("funding_history.parquet") 
 
-dune.upload_csv(
-    data=df.to_csv(index=False),
-    description="Funding rates arbitrage spreads",
-    table_name="funding_spreads", 
-    is_private=False
-)
-print("Données mises à jour sur Dune avec succès !")
+
