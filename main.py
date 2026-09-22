@@ -5,14 +5,16 @@ import concurrent.futures
 from streamlit_autorefresh import st_autorefresh
 import time
 import os
-from datetime import datetime, timedelta
+
+import datafeed
+from datafeed import ANCHOR, EXCHANGES
 
 
 # --- GLOBAL CONFIGURATION ---
 st.set_page_config(
     page_title="Funding Terminal", 
     layout="wide", 
-    page_icon="⚡"
+    page_icon="chart"
 )
 
 # Global Auto-refresh (Every 2 minutes)
@@ -34,15 +36,15 @@ def safe_float(value):
     except: return 0.0
 
 def get_opportunity_score(spread):
-    if spread > 100: return "🔥 HIGH"
-    elif spread > 30: return "⚡ MEDIUM"
-    return "❄️ LOW"
+    if spread > 100: return "HIGH"
+    elif spread > 30: return "MEDIUM"
+    return "LOW"
 
 # ==============================================================================
 #                               PAGE 1 : HIP-3 (BUILDERS ARBITRAGE)
 # ==============================================================================
 def render_hip3_page():
-    st.markdown("## 🏗️ HIP-3 Arbitrage")
+    st.markdown("## HIP-3 Arbitrage")
     
     HL_INFO_URL = "https://api.hyperliquid.xyz/info"
     
@@ -102,7 +104,7 @@ def render_hip3_page():
     
     if not df_matrix.empty:
         # --- FILTERS SECTION ---
-        st.sidebar.subheader("🔎 Builders Filters")
+        st.sidebar.subheader("Builders Filters")
         
         all_builders = list(df_matrix.columns)
         selected_builders = []
@@ -123,7 +125,7 @@ def render_hip3_page():
         def get_trade_action(row):
             vals = row[selected_builders].dropna()
             if len(vals) < 2: return "-"
-            return f"🟢 LONG {vals.idxmin()} / 🔴 SHORT {vals.idxmax()}"
+            return f"LONG {vals.idxmin()} / SHORT {vals.idxmax()}"
 
         df_sel['Trade Action'] = df_sel.apply(get_trade_action, axis=1)
         
@@ -161,152 +163,210 @@ def render_hip3_page():
 # ==============================================================================
 #                               PAGE 2 : MAINNET (MULTI-DEX)
 # ==============================================================================
+HISTORY_URL = "https://raw.githubusercontent.com/Colin503/dashboard_funding_rates/main/funding_history.parquet"
+
+# Counterparties ticked on first load; the others stay available in the sidebar.
+DEFAULT_COUNTERPARTS = {"Hyperliquid"}
+
+
+@st.cache_data(ttl=120)
+def load_live():
+    return datafeed.fetch_all()
+
+
+@st.cache_data(ttl=300)
+def load_history():
+    """Moyennes historiques par (symbol, asset_class)."""
+    try:
+        df = pd.read_parquet(HISTORY_URL, engine="pyarrow")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Erreur lecture historique: {exc}")
+        return pd.DataFrame()
+
+    if "asset_class" not in df.columns:
+        # Historique anterieur a la separation RWA : tout etait du crypto.
+        df["asset_class"] = "Crypto"
+    df["asset_class"] = df["asset_class"].fillna("Crypto")
+
+    cols = [c for c in EXCHANGES if c in df.columns]
+    if not cols:
+        return pd.DataFrame()
+
+    avg = df.groupby(["symbol", "asset_class"])[cols].mean().reset_index()
+    return avg.rename(columns={c: f"{c}_avg" for c in cols})
+
+
+def anchored_trade(row, counterparts):
+    """Spread et sens du trade, Variational obligatoirement sur une jambe.
+
+    Deux montages possibles :
+      LONG Variational / SHORT X  -> on encaisse  X - Variational
+      SHORT Variational / LONG X  -> on encaisse  Variational - X
+    On retient le plus rentable des deux.
+    """
+    nan = float("nan")
+    anchor_val = row.get(ANCHOR)
+    if pd.isna(anchor_val):
+        return nan, None, None
+
+    vals = row[counterparts].dropna().astype(float)
+    if vals.empty:
+        return nan, None, None
+
+    long_anchor_gain = vals.max() - anchor_val   # short la venue qui paie le plus
+    short_anchor_gain = anchor_val - vals.min()  # long la venue qui paie le moins
+
+    if long_anchor_gain >= short_anchor_gain:
+        other = vals.idxmax()
+        return long_anchor_gain, f"LONG {ANCHOR} / SHORT {other}", (ANCHOR, other)
+    other = vals.idxmin()
+    return short_anchor_gain, f"SHORT {ANCHOR} / LONG {other}", (other, ANCHOR)
+
+
+def pair_history(row):
+    """Spread moyen historique de la MEME paire que le trade live.
+
+    Renvoie NaN et non None quand l'historique manque : une colonne objet
+    contenant des None fait planter le formatage du Styler.
+    """
+    pair = row.get("_pair")
+    if not isinstance(pair, tuple):
+        return float("nan")
+    long_dex, short_dex = pair
+    long_avg, short_avg = row.get(f"{long_dex}_avg"), row.get(f"{short_dex}_avg")
+    if pd.notna(long_avg) and pd.notna(short_avg):
+        return short_avg - long_avg
+    return float("nan")
+
+
+def build_table(df_live, df_hist, active, show_history):
+    counterparts = [c for c in active if c != ANCHOR]
+    df = df_live.copy()
+
+    if not df_hist.empty:
+        df = df.merge(df_hist, on=["symbol", "asset_class"], how="left")
+
+    # Variational obligatoire + au moins une contrepartie cotee.
+    df = df[df[ANCHOR].notna() & (df[counterparts].notna().sum(axis=1) >= 1)].copy()
+    if df.empty:
+        return df, counterparts
+
+    res = df.apply(lambda r: anchored_trade(r, counterparts), axis=1, result_type="expand")
+    df["APR Spread"] = pd.to_numeric(res[0], errors="coerce")
+    df["Trade Action"], df["_pair"] = res[1], res[2]
+    df = df[df["APR Spread"].notna()].copy()
+    if df.empty:
+        return df, counterparts
+
+    df["Opportunity"] = df["APR Spread"].apply(get_opportunity_score)
+    if show_history and not df_hist.empty:
+        df["48h Pair Avg"] = pd.to_numeric(df.apply(pair_history, axis=1), errors="coerce")
+
+    return df.sort_values("APR Spread", ascending=False), counterparts
+
+
+def render_table(df, active, label_col, show_history):
+    cols = [label_col] + active + ["APR Spread"]
+    # Colonne masquee tant qu'aucun historique n'existe pour ces paires
+    # (les symboles RWA sont neufs, le parquet met quelques jours a se remplir).
+    if show_history and df.get("48h Pair Avg") is not None and df["48h Pair Avg"].notna().any():
+        cols.append("48h Pair Avg")
+    cols += ["Opportunity", "Trade Action"]
+    cols = [c for c in cols if c in df.columns]
+
+    # _pair n'est pas une colonne affichee : on la retrouve par l'index de ligne.
+    pairs = df["_pair"]
+
+    def style_row(row):
+        styles = ["" for _ in row.index]
+        pair = pairs.get(row.name)
+        if isinstance(pair, tuple):
+            long_dex, short_dex = pair
+            for dex, css in ((long_dex, "background-color: #006400; color: white; font-weight: bold;"),
+                             (short_dex, "background-color: #8B0000; color: white; font-weight: bold;")):
+                if dex in row.index:
+                    styles[row.index.get_loc(dex)] = css
+
+        avg = row.get("48h Pair Avg")
+        spread = row.get("APR Spread")
+        if pd.notna(avg) and pd.notna(spread) and "APR Spread" in row.index:
+            sign_flip = (spread > 0 > avg) or (spread < 0 < avg)
+            huge_diff = abs(spread - avg) > 5 and abs(spread) > abs(avg) * 2
+            if sign_flip or huge_diff:
+                styles[row.index.get_loc("APR Spread")] = "color: #FFD700; font-weight: bold;"
+        return styles
+
+    numeric = [c for c in cols if c not in (label_col, "Opportunity", "Trade Action")]
+    col_config = {c: st.column_config.NumberColumn(c, format="%.2f%%", width="small") for c in numeric}
+    col_config["Trade Action"] = st.column_config.TextColumn("Trade Action", width="large")
+
+    st.dataframe(
+        df[cols].style.apply(style_row, axis=1),
+        use_container_width=True,
+        hide_index=True,
+        height=min((len(df) + 1) * 35 + 3, 1000),
+        column_order=cols,
+        column_config=col_config,
+    )
+
+
 def render_mainnet_page():
-    st.markdown("## 🌐 Multi-DEX Arbitrage")
-    
-    VAR_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats"
-    HL_URL = "https://api.hyperliquid.xyz/info"
-    LIGHTER_URL = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
-    EXT_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
-    PAC_URL = "https://api.pacifica.fi/api/v1/info"
+    st.markdown("## Multi-DEX Arbitrage")
 
-    EXT_API_KEY = os.environ.get("EXT_API_KEY", "693ed8445baad0ae3b75c6d991bac4d9")
-    PACIFICA_API_KEY = os.environ.get("PACIFICA_API_KEY", "5h53egePzL1aM958CXWs9x4oY7FbnammiC7YiX7XErvD3TYk9L214kqP6j8GJ6wTQbnQzAk4Mbzxfo7aGKzrzP9s")
+    st.sidebar.subheader("Exchanges Selection")
+    st.sidebar.checkbox(ANCHOR, value=True, disabled=True, key="anchor_locked")
+    active = [ANCHOR] + [
+        ex for ex in EXCHANGES
+        if ex != ANCHOR and st.sidebar.checkbox(ex, value=ex in DEFAULT_COUNTERPARTS, key=f"mn_{ex}")
+    ]
+    show_history = st.sidebar.checkbox("Show Pair 48h Avg", value=True, key="mn_hist")
 
-    @st.cache_data(ttl=120)
-    def fetch_mainnet_data():
-        def get_var():
-            try:
-                r = requests.get(VAR_URL, timeout=3).json()
-                df = pd.DataFrame(r['listings'])
-                df['Variational'] = pd.to_numeric(df['funding_rate']) * 100
-                return df[['ticker', 'Variational']].rename(columns={'ticker': 'symbol'})
-            except: return pd.DataFrame(columns=['symbol', 'Variational'])
+    df_crypto, df_rwa, var_names, errors = load_live()
+    df_crypto["asset_class"] = "Crypto"
+    df_rwa["asset_class"] = "RWA"
+    df_hist = load_history()
 
-        def get_hl():
-            try:
-                r = requests.post(HL_URL, json={"type": "metaAndAssetCtxs"}, timeout=3).json()
-                data = [{'symbol': m['name'], 'Hyperliquid': (float(r[1][i]['funding']) * 3 * 365 * 100 * 8)} for i, m in enumerate(r[0]['universe'])]
-                return pd.DataFrame(data)
-            except: return pd.DataFrame(columns=['symbol', 'Hyperliquid'])
+    if errors:
+        st.warning("Unavailable venues: " + " · ".join(f"**{k}**" for k in errors))
 
-        def get_lighter():
-            try:
-                r = requests.get(LIGHTER_URL, headers={"accept": "application/json"}, timeout=3).json()
-                data = [{'symbol': i['symbol'].replace('1000',''), 'Lighter': (float(i['rate']) * 3 * 365 * 100)} for i in r.get('funding_rates', [])]
-                if data: return pd.DataFrame(data).groupby('symbol')['Lighter'].mean().reset_index()
-                return pd.DataFrame(columns=['symbol', 'Lighter'])
-            except: return pd.DataFrame(columns=['symbol', 'Lighter'])
-
-        def get_ext():
-            try:
-                r = requests.get(EXT_URL, headers={"X-Api-Key": EXT_API_KEY}, timeout=3).json()
-                data = [{'symbol': i['name'].split('-')[0], 'Extended': float(i['marketStats']['fundingRate']) * 24 * 365 * 100} for i in r.get('data', [])]
-                return pd.DataFrame(data)
-            except: return pd.DataFrame(columns=['symbol', 'Extended'])
-
-        def get_pac():
-            try:
-                r = requests.get(PAC_URL, headers={"X-Api-Key": PACIFICA_API_KEY}, timeout=3).json()
-                data = [{'symbol': i['symbol'].replace('-USD',''), 'Pacifica': float(i['next_funding_rate']) * 24 * 365 * 100} for i in r.get('data', [])]
-                return pd.DataFrame(data)
-            except: return pd.DataFrame(columns=['symbol', 'Pacifica'])
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            f_var, f_hl = executor.submit(get_var), executor.submit(get_hl)
-            f_li, f_ext = executor.submit(get_lighter), executor.submit(get_ext)
-            f_pac = executor.submit(get_pac)
-            return f_var.result(), f_hl.result(), f_li.result(), f_ext.result(), f_pac.result()
-
-    @st.cache_data(ttl=300) 
-    def get_48h_averages():
-        url = "https://raw.githubusercontent.com/Colin503/dashboard_funding_rates/main/funding_history.parquet"
-        try:
-            df = pd.read_parquet(url, engine='pyarrow')
-            cols = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
-            existing = [c for c in cols if c in df.columns]
-            if not existing: return pd.DataFrame()
-            df_avg = df.groupby('symbol')[existing].mean().reset_index()
-            return df_avg.rename(columns={c: f"{c}_avg" for c in existing})
-        except: return pd.DataFrame()
-
-    st.sidebar.subheader("🔎 Mainnet Filters")
-    exchanges = ['Variational', 'Hyperliquid', 'Lighter', 'Extended', 'Pacifica']
-    selected_ex = [e for e in exchanges if st.sidebar.checkbox(e, value=True, key=f"main_{e}")]
-    show_history = st.sidebar.checkbox("Show Pair 48h Avg", value=True)
-
-    if len(selected_ex) < 2:
-        st.warning("Please select at least 2 exchanges.")
+    if len(active) < 2:
+        st.warning(f"Select at least **one exchange** besides {ANCHOR}.")
         return
 
-    df_var, df_hl, df_li, df_ext, df_pac = fetch_mainnet_data()
-    df = pd.merge(df_var, df_hl, on='symbol', how='outer')
-    for d in [df_li, df_ext, df_pac]: df = pd.merge(df, d, on='symbol', how='outer')
+    st.write(f"Counterparties: **{', '.join(c for c in active if c != ANCHOR)}**")
 
-    df_hist = get_48h_averages()
-    has_history = not df_hist.empty
-    if has_history: df = pd.merge(df, df_hist, on='symbol', how='left')
-
-    df_live = df[df[selected_ex].notna().sum(axis=1) >= 2].copy()
-
-    if not df_live.empty:
-        df_live['APR Spread'] = df_live[selected_ex].max(axis=1) - df_live[selected_ex].min(axis=1)
-        df_live['Opportunity'] = df_live['APR Spread'].apply(get_opportunity_score)
-        
-        def get_main_trade(row):
-            vals = row[selected_ex].dropna()
-            return f"🟢 LONG {vals.idxmin()} / 🔴 SHORT {vals.idxmax()}"
-        df_live['Trade Action'] = df_live.apply(get_main_trade, axis=1)
-
-        def calc_pair_history(row):
-            vals = row[selected_ex].dropna()
-            if len(vals) < 2: return None
-            long, short = vals.idxmin(), vals.idxmax()
-            l_hist, s_hist = f"{long}_avg", f"{short}_avg"
-            if l_hist in row and s_hist in row and pd.notna(row[l_hist]) and pd.notna(row[s_hist]):
-                return row[s_hist] - row[l_hist]
-            return None
-
-        if show_history and has_history:
-            df_live['48h Pair Avg'] = df_live.apply(calc_pair_history, axis=1)
-
-        df_final = df_live.sort_values('APR Spread', ascending=False)
-
-        cols = ['symbol'] + selected_ex + ['APR Spread']
-        if show_history and has_history and '48h Pair Avg' in df_final.columns: cols.append('48h Pair Avg')
-        cols += ['Opportunity', 'Trade Action']
-        final_cols = [c for c in cols if c in df_final.columns]
-
-        def style_main(row):
-            styles = ['' for _ in row.index]
-            vals = row[selected_ex].astype(float)
-            if vals.notna().sum() >= 2:
-                styles[row.index.get_loc(vals.idxmin())] = 'background-color: #006400; color: white'
-                styles[row.index.get_loc(vals.idxmax())] = 'background-color: #8B0000; color: white'
-            
-            if '48h Pair Avg' in row and pd.notna(row['48h Pair Avg']):
-                curr, avg = row['APR Spread'], row['48h Pair Avg']
-                flip = (curr > 0 and avg < 0) or (curr < 0 and avg > 0)
-                diff = abs(curr - avg) > 5 and abs(curr) > abs(avg) * 2
-                if flip or diff:
-                    styles[row.index.get_loc('APR Spread')] = 'color: #FFD700; font-weight: bold; background-color: #333300'
-            return styles
-
-        st.dataframe(
-            df_final[final_cols].style.apply(style_main, axis=1).format({
-                c: "{:.2f}%" for c in final_cols if c not in ['symbol', 'Opportunity', 'Trade Action']
-            }, na_rep="-"),
-            use_container_width=True, hide_index=True,
-            column_config={"Trade Action": st.column_config.TextColumn("Trade Action", width="large")}
-        )
+    st.subheader("Crypto")
+    table, _ = build_table(df_crypto, df_hist, active, show_history)
+    if table.empty:
+        st.info(f"No crypto pair quoted on {ANCHOR} and a counterparty.")
     else:
-        st.info("No common pairs found.")
+        st.caption(f"{len(table)} crypto pairs tradable from {ANCHOR}.")
+        render_table(table, active, "symbol", show_history)
+
+    st.divider()
+
+    st.subheader("RWA")
+    state, label = datafeed.us_market_session()
+    (st.success if state == "open" else st.info)(label)
+
+    table, _ = build_table(df_rwa, df_hist, active, show_history)
+    if table.empty:
+        st.info(f"No RWA pair quoted on {ANCHOR} and a counterparty.")
+    else:
+        st.caption(f"{len(table)} RWA pairs tradable from {ANCHOR}.")
+        render_table(table, active, "label", show_history)
+
+    pending = datafeed.unmapped_rwa_candidates(var_names)
+    if pending:
+        with st.expander(f"{len(pending)} unmapped {ANCHOR} listing(s) that look like RWA"):
+            st.caption("Add them to `RWA_REGISTRY` in `assets.py` if they really are RWA.")
+            st.table(pd.DataFrame(pending, columns=["ticker", "name"]))
 
 # ==============================================================================
 #                               SIDEBAR NAVIGATION
 # ==============================================================================
 
-st.sidebar.title("🧭 Navigation")
+st.sidebar.title("Navigation")
 page = st.sidebar.radio("Select Dashboard:", ["HIP-3", "Multi-DEX"])
 st.sidebar.markdown("---")
 
